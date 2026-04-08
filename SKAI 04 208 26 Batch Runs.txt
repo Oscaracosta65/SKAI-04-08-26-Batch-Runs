@@ -50834,8 +50834,15 @@ document.addEventListener('DOMContentLoaded', function () {
       }
       _mainNums = _dcPrimary.slice();
     } else {
-      _mainNums = (r.mainNumbers && r.mainNumbers.length) ? r.mainNumbers.slice() : [];
-      // Fallback 1: finalPredictionSets
+      // Mimic the regular save: read skaiSaveMainOrdered live (primary source), exactly
+      // as the manual save button does at lines 41830-41834.  The per-run snapshot
+      // r.mainNumbers is kept as an immediate fallback in case the live global was cleared.
+      if (window.skaiSaveMainOrdered && window.skaiSaveMainOrdered.length) {
+        _mainNums = normalizeNumericArray(window.skaiSaveMainOrdered);
+      } else if (r.mainNumbers && r.mainNumbers.length) {
+        _mainNums = r.mainNumbers.slice();
+      }
+      // Fallback 1: finalPredictionSets (snapshot)
       if (!_mainNums.length && r.finalPredictionSets && r.finalPredictionSets.length) {
         var _fps0 = r.finalPredictionSets[0] || {};
         var _fps0m = Array.isArray(_fps0.main) ? _fps0.main : (Array.isArray(_fps0.values) ? _fps0.values : []);
@@ -50844,6 +50851,22 @@ document.addEventListener('DOMContentLoaded', function () {
       // Fallback 2: SKAI_TOP_MAIN global (still set from this run's scoring)
       if (!_mainNums.length && window.SKAI_TOP_MAIN && window.SKAI_TOP_MAIN.length) {
         _mainNums = window.SKAI_TOP_MAIN.map(function(x){ return x.num; }).filter(function(n){ return isFinite(n); });
+      }
+      // Fallback 3: DOM .nball elements — mirrors the mainsArrDom DOM fallback in the
+      // regular save (lines 41784-41788 / 41813).  Last resort so batch saves never
+      // fail with empty_main_numbers when all in-memory sources are unavailable.
+      if (!_mainNums.length) {
+        try {
+          var _domBalls = document.querySelectorAll(
+            '#aiPredictedNumbers .nball, #skai-ai-panel .nball, .skai-ai-main .nball'
+          );
+          var _domNums = [];
+          for (var _dbi = 0; _dbi < _domBalls.length && _dbi < 20; _dbi++) {
+            var _dbt = (_domBalls[_dbi].textContent || '').replace(/\D/g, '').trim();
+            if (_dbt && /^\d+$/.test(_dbt)) { _domNums.push(parseInt(_dbt, 10)); }
+          }
+          if (_domNums.length) { _mainNums = normalizeNumericArray(_domNums); }
+        } catch (_) {}
       }
       _extraNums = (r.extraNumbers && r.extraNumbers.length) ? normalizeNumericArray(r.extraNumbers).slice(0, 5) : [];
       if (!_extraNums.length && r.finalPredictionSets && r.finalPredictionSets.length) {
