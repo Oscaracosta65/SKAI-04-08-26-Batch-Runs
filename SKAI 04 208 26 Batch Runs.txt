@@ -50049,10 +50049,17 @@ document.addEventListener('DOMContentLoaded', function () {
       }, false);
     }
 
+    // FIX: Register completion listeners immediately so they receive skai:done and
+    // skai:score:done even when skai:ml:start is never delivered to our bubble-phase
+    // listener.  The auto-tune capture-phase interceptor (line 27780) calls
+    // stopImmediatePropagation() on every skai:ml:start, which prevents all
+    // bubble-phase listeners -- including _onMlStart -- from firing.
+    registerCompletionListeners();
+
     _onMlStart = function onMlStart() {
       try { window.removeEventListener('skai:ml:start', _onMlStart, false); } catch (_) {}
       _onMlStart = null;
-      registerCompletionListeners();
+      // registerCompletionListeners() was already called eagerly above.
     };
     window.addEventListener('skai:ml:start', _onMlStart, false);
 
@@ -50064,7 +50071,13 @@ document.addEventListener('DOMContentLoaded', function () {
     if (mlRunner) {
       try {
         window.__SKAI_RUNNING__    = false;
-        window.__SKAI_RUN_ACTIVE__ = false;
+        // FIX: Keep __SKAI_RUN_ACTIVE__ = true so that the skai:ml:done bubble-phase
+        // listener (line 31510: "if (!window.__SKAI_RUN_ACTIVE__) return;") does NOT
+        // skip calling maybeAllDone().  The capture-phase interceptor at line 27780
+        // (stopImmediatePropagation) prevents the skai:ml:start bubble listener at
+        // line 31420 from ever setting __SKAI_RUN_ACTIVE__ = true, so we set it here
+        // directly before invoking the ML runner.
+        window.__SKAI_RUN_ACTIVE__ = true;
         mlRunner();
       } catch (_) { finish(); }
     } else {
@@ -50866,6 +50879,27 @@ document.addEventListener('DOMContentLoaded', function () {
             if (_dbt && /^\d+$/.test(_dbt)) { _domNums.push(parseInt(_dbt, 10)); }
           }
           if (_domNums.length) { _mainNums = normalizeNumericArray(_domNums); }
+        } catch (_) {}
+      }
+      // Fallback 4: Rank window.SKAI_lastProbs directly (raw ML output).
+      // Used when SKAI_scoreAndRender returned early (dsOK/pOK gate) but training
+      // still completed and stored per-number probabilities.  Produces the same
+      // top-20 ordering the scoring engine would compute, without the skip-prior blend.
+      if (!_mainNums.length) {
+        try {
+          var _lpArr = window.SKAI_lastProbs;
+          if (Array.isArray(_lpArr) && _lpArr.length) {
+            var _lpRanked = [];
+            for (var _lpi = 0; _lpi < _lpArr.length; _lpi++) {
+              if (typeof _lpArr[_lpi] === 'number' && isFinite(_lpArr[_lpi])) {
+                _lpRanked.push({ num: _lpi + 1, p: _lpArr[_lpi] });
+              }
+            }
+            _lpRanked.sort(function(a, b) { return b.p - a.p; });
+            for (var _lpk = 0; _lpk < Math.min(20, _lpRanked.length); _lpk++) {
+              _mainNums.push(_lpRanked[_lpk].num);
+            }
+          }
         } catch (_) {}
       }
       _extraNums = (r.extraNumbers && r.extraNumbers.length) ? normalizeNumericArray(r.extraNumbers).slice(0, 5) : [];
