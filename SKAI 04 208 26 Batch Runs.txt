@@ -18291,21 +18291,12 @@ $escDrawDate = htmlspecialchars($formattedDrawDate, ENT_QUOTES, 'UTF-8');
 <?php endif; ?>
 
 <?php if ($skaiUiVisible): ?>
-<!-- SKAI: Run 9-Combo Default Batch — temporarily disabled (under review) -->
+<!-- SKAI: Run 9-Combo Default Batch -->
 <div style="margin:10px 0 4px 0;">
-  <button type="button" id="skai-batch-launch" class="btn-outline" disabled
-    style="display:inline-block;font-size:0.9rem;padding:7px 14px;opacity:0.5;cursor:not-allowed;"
-    aria-disabled="true">
+  <button type="button" id="skai-batch-launch" class="btn-outline"
+    style="display:inline-block;font-size:0.9rem;padding:7px 14px;">
     Run 9-Combo Default Batch
   </button>
-  <div style="margin-top:8px;padding:10px 13px;border-radius:10px;border:1px solid rgba(245,166,35,0.45);background:linear-gradient(135deg,rgba(245,166,35,0.12) 0%,rgba(255,251,235,0.97) 100%);color:#0A1A33;display:flex;align-items:flex-start;gap:8px;">
-    <div aria-hidden="true" style="flex:0 0 auto;width:22px;height:22px;border-radius:50%;background:#F5A623;color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center;font-size:0.85rem;line-height:1;">!</div>
-    <div style="font-size:0.82rem;line-height:1.55;color:#374151;">
-      <strong style="color:#0A1A33;">9-Combo Batch is under review.</strong>
-      This feature is temporarily unavailable while we complete reliability improvements.
-      It will be back as soon as our review is done. Use single-run predictions in the meantime.
-    </div>
-  </div>
 </div>
 
 <!-- SKAI: Batch confirmation modal -->
@@ -18356,6 +18347,10 @@ $escDrawDate = htmlspecialchars($formattedDrawDate, ENT_QUOTES, 'UTF-8');
     <button type="button" id="skai-batch-stop" class="btn-outline"
       style="font-size:0.85rem;padding:5px 12px;color:#dc2626;border-color:#dc2626;">
       Stop Batch
+    </button>
+    <button type="button" id="skai-batch-pause" class="btn-outline"
+      style="font-size:0.85rem;padding:5px 12px;color:#d97706;border-color:#d97706;">
+      Pause
     </button>
     <button type="button" id="skai-batch-clear" class="btn-outline"
       style="font-size:0.85rem;padding:5px 12px;">
@@ -49786,15 +49781,16 @@ document.addEventListener('DOMContentLoaded', function () {
 </script>
 
 
-<!-- SKAI Feature A: Run 9-Combo Default Batch -->
+<!-- SKAI Feature A: Run 9-Combo Default Batch (isolated run system) -->
 <script>
 (function () {
   "use strict";
-  // Reactivated for daily digit games as well.
 
-  // FIX: Local fallback for normalizeNumericArray in case the Block B IIFE has not
-  // executed yet or window.normalizeNumericArray was not set. Uses window reference
-  // first (set by Block B), then falls back to the inline implementation.
+  // Singleton guard: prevent double-initialization on multi-module pages.
+  if (window.__SKAI_BATCH_RUNNER_INIT__) { return; }
+  window.__SKAI_BATCH_RUNNER_INIT__ = true;
+
+  // Local fallback for normalizeNumericArray.
   var normalizeNumericArray = (typeof window.normalizeNumericArray === 'function')
     ? window.normalizeNumericArray
     : function normalizeNumericArray(arr) {
@@ -49808,131 +49804,435 @@ document.addEventListener('DOMContentLoaded', function () {
       };
 
 
+  // -----------------------------------------------------------------------
+  // Constants
+  // -----------------------------------------------------------------------
   var BATCH_COMBOS = [
-    { profile: "balanced",     strategy: "ai",     label: "Balanced x AI-Forward" },
-    { profile: "balanced",     strategy: "hybrid",  label: "Balanced x Balanced Mix" },
-    { profile: "balanced",     strategy: "skip",    label: "Balanced x Skip Pattern Boost" },
-    { profile: "explorative",  strategy: "ai",     label: "Explorative x AI-Forward" },
-    { profile: "explorative",  strategy: "hybrid",  label: "Explorative x Balanced Mix" },
-    { profile: "explorative",  strategy: "skip",    label: "Explorative x Skip Pattern Boost" },
-    { profile: "conservative", strategy: "ai",     label: "Conservative x AI-Forward" },
-    { profile: "conservative", strategy: "hybrid",  label: "Conservative x Balanced Mix" },
-    { profile: "conservative", strategy: "skip",    label: "Conservative x Skip Pattern Boost" }
+    { profile: "balanced",     strategy: "ai",    label: "Balanced x AI-Forward" },
+    { profile: "balanced",     strategy: "hybrid", label: "Balanced x Balanced Mix" },
+    { profile: "balanced",     strategy: "skip",   label: "Balanced x Skip Pattern Boost" },
+    { profile: "explorative",  strategy: "ai",    label: "Explorative x AI-Forward" },
+    { profile: "explorative",  strategy: "hybrid", label: "Explorative x Balanced Mix" },
+    { profile: "explorative",  strategy: "skip",   label: "Explorative x Skip Pattern Boost" },
+    { profile: "conservative", strategy: "ai",    label: "Conservative x AI-Forward" },
+    { profile: "conservative", strategy: "hybrid", label: "Conservative x Balanced Mix" },
+    { profile: "conservative", strategy: "skip",   label: "Conservative x Skip Pattern Boost" }
   ];
 
-  var STORAGE_KEY = "skai_batch_results_v1";
+  // sessionStorage: captured run results (large, session-scoped).
+  var SESSION_KEY  = "skai_batch_results_v1";
+  // localStorage: queue / progress state (lightweight, survives reload).
+  var LS_STATE_KEY = "skai_batch_state_v1";
+
+  // -----------------------------------------------------------------------
+  // Batch state  (strict separation: batch state | run state | UI state)
+  // -----------------------------------------------------------------------
+  var batchState = {
+    running:     false,
+    paused:      false,
+    stopped:     false,
+    index:       0,
+    doneCount:   0,
+    token:       null,       // active run token -- changes each run
+    pauseResume: null        // stored callback for resume
+  };
   var batchResults = [];
-  var batchRunning = false;
-  var batchStopped = false;
-  var batchIndex = 0;
+
+  // Back-compat aliases used by saveAllSequential and legacy paths.
+  // These mirror batchState and are kept in sync on every write.
+  var batchRunning  = false;
+  var batchStopped  = false;
+  var batchIndex    = 0;
   var batchDoneCount = 0;
 
+  function syncAliases() {
+    batchRunning   = batchState.running;
+    batchStopped   = batchState.stopped;
+    batchIndex     = batchState.index;
+    batchDoneCount = batchState.doneCount;
+  }
+
+  // -----------------------------------------------------------------------
+  // [[skaiGenerateRunToken]]
+  // Returns a unique token string for each run. All callbacks and saves
+  // must validate against this token. Stale callbacks are silently ignored.
+  // -----------------------------------------------------------------------
+  function skaiGenerateRunToken() {
+    var rnd = '';
+    try { rnd = Math.random().toString(36).slice(2, 9); } catch (_) { rnd = 'x'; }
+    return 'skai_' + Date.now() + '_' + rnd;
+  }
+
+  // -----------------------------------------------------------------------
+  // [[skaiResetRunState]]
+  // Hard-clears ALL per-run global state before a new run begins.
+  // Clears: number arrays, candidate pools, predicted numbers, extra/bonus
+  // numbers, hidden inputs, DOM containers, temporary variables, run locks.
+  // Safe to call from manual runs as well (no batch-specific side effects).
+  // Returns a status object for diagnostics.
+  // -----------------------------------------------------------------------
+  function skaiResetRunState(runToken) {
+    try {
+      // --- Number arrays ---
+      window.SKAI_FINAL_PREDICTION_SETS = [];
+      window.SKAI_DAILY_CHOSEN_COMBOS   = [];
+      window.SKAI_POS_COMBOS            = null;
+      window.__SKAI_FPS_JSON__          = null;
+      window.skaiSaveMainOrdered        = [];
+      window.skaiSaveExtraOrdered       = [];
+      window.SKAI_TOP_EXTRA             = null;
+      window.__SKAI_LAST_EXTRA__        = null;
+      window.SKAI_LAST_EXTRA            = null;
+      window.SKAI_TOP_MAIN              = null;
+      window.SKAI_DAILY_EXTRA_DIGITS    = [];
+      window.SKAI_DAILY_TOP_EXTRAS      = [];
+      // --- Candidate pool ---
+      window.SKAI_CANDIDATE_POOL = null;
+      // --- Per-run blend tracking ---
+      window.__SKAI_SELECTED_BLEND_AI_PCT__  = null;
+      window.__SKAI_EFFECTIVE_BLEND_AI_PCT__ = null;
+      window.__SKAI_BLEND_OPTIMIZED__        = 0;
+      window.__SKAI_ALLOW_BLEND_OPT__        = false;
+      // --- reproKey / seed: prevent carryover between runs ---
+      if (window.SKAI_SETTINGS) {
+        window.SKAI_SETTINGS.reproKey = null;
+        window.SKAI_SETTINGS.seed     = null;
+      }
+      // --- Stability score cache ---
+      window.SKAI_lastScoreByNum = {};
+      // --- DOM hidden inputs ---
+      var _dtc = document.getElementById('skai-ai-daily-top-combos-json');
+      if (_dtc) { _dtc.value = ''; }
+      var _tcs = document.querySelectorAll('input[name="top_combos_json"]');
+      for (var _i = 0; _i < _tcs.length; _i++) {
+        try { _tcs[_i].value = ''; } catch (_) {}
+      }
+      // --- Run locks ---
+      window.__SKAI_RUNNING__    = false;
+      window.__SKAI_RUN_ACTIVE__ = false;
+    } catch (_) {}
+    return { reset: true, token: runToken || null, ts: Date.now() };
+  }
+
+  // -----------------------------------------------------------------------
+  // [[skaiExecuteIsolatedRun]]
+  // Executes one run with complete isolation.
+  // Accepts: combo {profile, strategy, label}, runToken, onComplete callback.
+  // No dependency on prior state. Builds fresh execution context.
+  // Calls onComplete(structuredResult) where structuredResult includes:
+  //   success, runToken, lotteryKey, presetKey, predictedNumbers,
+  //   extraNumbers, bonusNumbers, savePayload, errorMessage, timestamps.
+  // DOM is NOT the source of truth -- per-run snapshots are used.
+  // Token guard: stale callbacks from prior runs are silently dropped.
+  // -----------------------------------------------------------------------
+  function skaiExecuteIsolatedRun(combo, runToken, onComplete) {
+    var timestamps = { started: Date.now(), completed: null };
+
+    if (!combo || !runToken || typeof onComplete !== 'function') {
+      if (typeof onComplete === 'function') {
+        onComplete({
+          success: false, runToken: runToken || null,
+          lotteryKey: '', presetKey: '',
+          predictedNumbers: [], extraNumbers: [], bonusNumbers: [],
+          savePayload: null, errorMessage: 'Invalid combo or run token.',
+          timestamps: { started: Date.now(), completed: Date.now() }
+        });
+      }
+      return;
+    }
+
+    // Step 1: Hard reset -- fresh execution context, no carryover.
+    skaiResetRunState(runToken);
+
+    // Step 2: Apply combo settings cleanly.
+    try {
+      if (typeof window.skaiApplyCombo === 'function') {
+        window.skaiApplyCombo(combo.profile, combo.strategy);
+      } else {
+        selectProfile(combo.profile);
+        selectStrategy(combo.strategy);
+      }
+    } catch (_) {}
+
+    // Step 3: Closure-local snapshots (never shared across runs).
+    var _snapMainNums            = null;
+    var _snapExtraNums           = null;
+    var _snapFpsJson             = null;
+    var _snapDailyChosenCombos   = null;
+    var _snapFinalPredictionSets = null;
+
+    var finished        = false;
+    var _doneFired      = false;
+    var _scoreDoneFired = false;
+    var _onMlStart      = null;
+    var safetyTimer     = null;
+
+    function finish() {
+      if (finished) { return; }
+      // Token guard: reject stale callbacks from previous runs.
+      if (runToken !== batchState.token) { return; }
+      finished = true;
+      try { clearTimeout(safetyTimer); } catch (_) {}
+      if (_onMlStart) {
+        try { window.removeEventListener('skai:ml:start', _onMlStart, false); } catch (_) {}
+        _onMlStart = null;
+      }
+      timestamps.completed = Date.now();
+
+      // Capture results using closure-local snapshots (not shared globals).
+      var res = captureResult(
+        _snapMainNums, _snapExtraNums, _snapFpsJson,
+        _snapDailyChosenCombos, _snapFinalPredictionSets
+      );
+
+      var lotteryKey = '';
+      try {
+        lotteryKey = String(
+          (window.lottoConfig && window.lottoConfig.gameId) ||
+          (window.SKAI_META   && window.SKAI_META.gameId)   || ''
+        );
+      } catch (_) {}
+
+      // Structured result object -- DOM is not the source of truth.
+      onComplete({
+        success:          !!(res.mainNumbers && res.mainNumbers.length > 0),
+        runToken:         runToken,
+        lotteryKey:       lotteryKey,
+        presetKey:        combo.profile + '_' + combo.strategy,
+        predictedNumbers: res.mainNumbers  || [],
+        extraNumbers:     res.extraNumbers || [],
+        bonusNumbers:     (res.dailyExtraDigits && res.dailyExtraDigits.length)
+                            ? res.dailyExtraDigits.slice()
+                            : (res.extraNumbers || []),
+        savePayload:      res,
+        errorMessage:     (res.mainNumbers && res.mainNumbers.length)
+                            ? '' : 'No main numbers captured.',
+        timestamps:       timestamps
+      });
+    }
+
+    function checkAllDone() {
+      if (_doneFired && _scoreDoneFired) { finish(); }
+    }
+
+    // Register completion listeners only after skai:ml:start for THIS run.
+    // Prevents stale events from a previous run's trailing callbacks from
+    // satisfying the dual-gate before this run's training has started.
+    function registerCompletionListeners() {
+      if (finished) { return; }
+      window.addEventListener('skai:done', function onSkaiDone() {
+        try { window.removeEventListener('skai:done', onSkaiDone, false); } catch (_) {}
+        _doneFired = true;
+        checkAllDone();
+      }, false);
+      window.addEventListener('skai:score:done', function onScoreDone() {
+        try { window.removeEventListener('skai:score:done', onScoreDone, false); } catch (_) {}
+        // Snapshot at event time while values are guaranteed valid.
+        try { _snapMainNums = (window.skaiSaveMainOrdered && window.skaiSaveMainOrdered.length)
+                ? window.skaiSaveMainOrdered.slice() : null; } catch (_) {}
+        try { _snapExtraNums = (window.skaiSaveExtraOrdered && window.skaiSaveExtraOrdered.length)
+                ? window.skaiSaveExtraOrdered.slice() : null; } catch (_) {}
+        try { _snapFpsJson = window.__SKAI_FPS_JSON__ || null; } catch (_) {}
+        try { _snapDailyChosenCombos = (window.SKAI_DAILY_CHOSEN_COMBOS && window.SKAI_DAILY_CHOSEN_COMBOS.length)
+                ? window.SKAI_DAILY_CHOSEN_COMBOS.slice() : null; } catch (_) {}
+        try { _snapFinalPredictionSets = (window.SKAI_FINAL_PREDICTION_SETS && window.SKAI_FINAL_PREDICTION_SETS.length)
+                ? window.SKAI_FINAL_PREDICTION_SETS.slice() : null; } catch (_) {}
+        _scoreDoneFired = true;
+        checkAllDone();
+      }, false);
+    }
+
+    _onMlStart = function onMlStart() {
+      try { window.removeEventListener('skai:ml:start', _onMlStart, false); } catch (_) {}
+      _onMlStart = null;
+      registerCompletionListeners();
+    };
+    window.addEventListener('skai:ml:start', _onMlStart, false);
+
+    // 5-minute safety net in case skai:done never fires.
+    safetyTimer = setTimeout(finish, 300000);
+
+    // Step 4: Trigger the ML runner directly (avoids arm() gating issues).
+    var mlRunner = (typeof window.runSkaiML === 'function') ? window.runSkaiML : null;
+    if (mlRunner) {
+      try {
+        window.__SKAI_RUNNING__    = false;
+        window.__SKAI_RUN_ACTIVE__ = false;
+        mlRunner();
+      } catch (_) { finish(); }
+    } else {
+      var runBtn = document.getElementById('startPrediction') ||
+                  document.getElementById('runPrediction');
+      if (!runBtn) {
+        timestamps.completed = Date.now();
+        onComplete({
+          success: false, runToken: runToken,
+          lotteryKey: '', presetKey: combo.profile + '_' + combo.strategy,
+          predictedNumbers: [], extraNumbers: [], bonusNumbers: [],
+          savePayload: null, errorMessage: 'Run button not found.',
+          timestamps: timestamps
+        });
+        return;
+      }
+      try {
+        if (typeof runBtn.click === 'function') { runBtn.click(); }
+        else {
+          var _ev = document.createEvent('MouseEvents');
+          _ev.initEvent('click', true, true);
+          runBtn.dispatchEvent(_ev);
+        }
+      } catch (_) { finish(); }
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Storage helpers
+  // -----------------------------------------------------------------------
   function persistResults() {
     try {
       var slim = [];
       for (var i = 0; i < batchResults.length; i++) {
         var r = batchResults[i];
-        slim.push({ combo: r.combo, text: r.text || "", done: !!r.done,
-                    mainNumbers: r.mainNumbers || [], extraNumbers: r.extraNumbers || [],
-                    finalPredictionSets: r.finalPredictionSets || [],
-                    fpsJson: r.fpsJson || '', dailyChosenCombos: r.dailyChosenCombos || [],
-                    dailyExtraDigits: r.dailyExtraDigits || [], dailyTopExtras: r.dailyTopExtras || [],
-                    blendAiPct: (typeof r.blendAiPct === 'number') ? r.blendAiPct : null,
-                    blendSkipPct: null,
-                    blendLabel: r.blendLabel || '',
-                    selectedBlendAiPct:  (typeof r.selectedBlendAiPct  === 'number') ? r.selectedBlendAiPct  : null,
-                    effectiveBlendAiPct: (typeof r.effectiveBlendAiPct === 'number') ? r.effectiveBlendAiPct : null,
-                    blendOptimized:      r.blendOptimized  ? 1 : 0,
-                    allowBlendOpt:       r.allowBlendOpt   ? 1 : 0,
-                    temperature: (typeof r.temperature === 'number') ? r.temperature : null,
-                    diversityPenalty: (typeof r.diversityPenalty === 'number') ? r.diversityPenalty : null,
-                    settingsSnapshot: r.settingsSnapshot || null });
+        slim.push({
+          combo:               r.combo,
+          text:                r.text || '',
+          done:                !!r.done,
+          status:              r.status || (r.done ? 'completed' : 'pending'),
+          runToken:            r.runToken || '',
+          lotteryKey:          r.lotteryKey || '',
+          presetKey:           r.presetKey || '',
+          mainNumbers:         r.mainNumbers  || [],
+          extraNumbers:        r.extraNumbers || [],
+          bonusNumbers:        r.bonusNumbers || [],
+          finalPredictionSets: r.finalPredictionSets || [],
+          fpsJson:             r.fpsJson || '',
+          dailyChosenCombos:   r.dailyChosenCombos  || [],
+          dailyExtraDigits:    r.dailyExtraDigits   || [],
+          dailyTopExtras:      r.dailyTopExtras     || [],
+          blendAiPct:          (typeof r.blendAiPct         === 'number') ? r.blendAiPct         : null,
+          blendSkipPct:        null,
+          blendLabel:          r.blendLabel || '',
+          selectedBlendAiPct:  (typeof r.selectedBlendAiPct  === 'number') ? r.selectedBlendAiPct  : null,
+          effectiveBlendAiPct: (typeof r.effectiveBlendAiPct === 'number') ? r.effectiveBlendAiPct : null,
+          blendOptimized:      r.blendOptimized ? 1 : 0,
+          allowBlendOpt:       r.allowBlendOpt  ? 1 : 0,
+          temperature:         (typeof r.temperature      === 'number') ? r.temperature      : null,
+          diversityPenalty:    (typeof r.diversityPenalty === 'number') ? r.diversityPenalty : null,
+          settingsSnapshot:    r.settingsSnapshot || null,
+          timestamps:          r.timestamps || {}
+        });
       }
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(slim));
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify(slim));
+    } catch (_) {}
+    saveBatchStateToLocalStorage();
+  }
+
+  function saveBatchStateToLocalStorage() {
+    try {
+      localStorage.setItem(LS_STATE_KEY, JSON.stringify({
+        running:   batchState.running,
+        paused:    batchState.paused,
+        stopped:   batchState.stopped,
+        index:     batchState.index,
+        doneCount: batchState.doneCount,
+        ts:        Date.now()
+      }));
     } catch (_) {}
   }
 
   function loadPersistedResults() {
     try {
-      var raw = sessionStorage.getItem(STORAGE_KEY);
+      var raw = sessionStorage.getItem(SESSION_KEY);
       if (!raw) { return []; }
       return JSON.parse(raw) || [];
     } catch (_) { return []; }
   }
 
+  // -----------------------------------------------------------------------
+  // DOM helpers
+  // -----------------------------------------------------------------------
   function qs(id) { return document.getElementById(id); }
 
   function setCell(profile, strategy, content, className) {
-    var cell = qs("skai-cell-" + profile + "-" + strategy);
+    var cell = qs('skai-cell-' + profile + '-' + strategy);
     if (!cell) { return; }
     cell.innerHTML = content;
-    cell.style.background = className === "running" ? "#eff6ff" :
-                            className === "done"    ? "#f0fdf4" :
-                            className === "error"   ? "#fef2f2" : "";
+    cell.style.background =
+      className === 'running' ? '#eff6ff' :
+      className === 'done'    ? '#f0fdf4' :
+      className === 'error'   ? '#fef2f2' : '';
   }
 
   function updateProgress() {
-    var pt = qs("skai-batch-progress-text");
+    var pt = qs('skai-batch-progress-text');
     if (!pt) { return; }
     var total = BATCH_COMBOS.length;
-    if (batchDoneCount === 0 && !batchRunning) {
-      pt.textContent = "Ready";
-    } else if (batchRunning) {
-      pt.textContent = "Running: " + batchDoneCount + " of " + total + " done";
-    } else if (batchStopped && batchDoneCount < total) {
-      pt.textContent = batchDoneCount + " of " + total + " complete (batch stopped)";
+    if (batchState.doneCount === 0 && !batchState.running && !batchState.paused) {
+      pt.textContent = 'Ready';
+    } else if (batchState.paused) {
+      pt.textContent = 'Paused: ' + batchState.doneCount + ' of ' + total + ' done';
+    } else if (batchState.running) {
+      pt.textContent = 'Running: ' + batchState.doneCount + ' of ' + total + ' done';
+    } else if (batchState.stopped && batchState.doneCount < total) {
+      pt.textContent = batchState.doneCount + ' of ' + total + ' complete (batch stopped)';
     } else {
-      pt.textContent = batchDoneCount + " of " + total + " complete \u2014 ready to save";
+      pt.textContent = batchState.doneCount + ' of ' + total + ' complete - ready to save';
     }
+    saveBatchStateToLocalStorage();
+  }
+
+  function setPauseButtonLabel(paused) {
+    var btn = qs('skai-batch-pause');
+    if (btn) { btn.textContent = paused ? 'Resume' : 'Pause'; }
   }
 
   function setCurrentLabel(label) {
-    var cl = qs("skai-batch-current-label");
+    var cl = qs('skai-batch-current-label');
     if (cl) { cl.textContent = label; }
   }
 
   function showPanel() {
-    var p = qs("skai-batch-panel");
-    if (p) { p.style.display = "block"; }
+    var p = qs('skai-batch-panel');
+    if (p) { p.style.display = 'block'; }
   }
 
   function hideModal() {
-    var m = qs("skai-batch-modal");
-    if (m) { m.style.display = "none"; }
+    var m = qs('skai-batch-modal');
+    if (m) { m.style.display = 'none'; }
   }
 
   function selectProfile(profile) {
     try {
-      var btns = document.querySelectorAll("[data-profile]");
+      var btns = document.querySelectorAll('[data-profile]');
       for (var i = 0; i < btns.length; i++) {
         var b = btns[i];
-        var isTarget = (String(b.getAttribute("data-profile")).toLowerCase() === profile);
-        b.setAttribute("aria-pressed", isTarget ? "true" : "false");
+        var isTarget = (String(b.getAttribute('data-profile')).toLowerCase() === profile);
+        b.setAttribute('aria-pressed', isTarget ? 'true' : 'false');
         if (isTarget) {
-          b.className = (b.className || "").replace(/\bis-active\b/g, "").trim() + " is-active";
+          b.className = (b.className || '').replace(/\bis-active\b/g, '').trim() + ' is-active';
         } else {
-          b.className = (b.className || "").replace(/\bis-active\b/g, "").trim();
+          b.className = (b.className || '').replace(/\bis-active\b/g, '').trim();
         }
       }
-      var inp = qs("skai-risk-profile") || qs("skai-ai-risk-profile");
+      var inp = qs('skai-risk-profile') || qs('skai-ai-risk-profile');
       if (inp) { inp.value = profile; }
     } catch (_) {}
   }
 
   function selectStrategy(strategy) {
     try {
-      var btns = document.querySelectorAll("[data-strategy]");
+      var btns = document.querySelectorAll('[data-strategy]');
       for (var i = 0; i < btns.length; i++) {
         var b = btns[i];
-        var isTarget = (String(b.getAttribute("data-strategy")).toLowerCase() === strategy);
-        b.setAttribute("aria-pressed", isTarget ? "true" : "false");
+        var isTarget = (String(b.getAttribute('data-strategy')).toLowerCase() === strategy);
+        b.setAttribute('aria-pressed', isTarget ? 'true' : 'false');
         if (isTarget) {
-          b.className = (b.className || "").replace(/\bis-active\b/g, "").trim() + " is-active";
+          b.className = (b.className || '').replace(/\bis-active\b/g, '').trim() + ' is-active';
         } else {
-          b.className = (b.className || "").replace(/\bis-active\b/g, "").trim();
+          b.className = (b.className || '').replace(/\bis-active\b/g, '').trim();
         }
       }
-      var inp = qs("skai-strategy") || qs("skai-ai-strategy");
+      var inp = qs('skai-strategy') || qs('skai-ai-strategy');
       if (inp) { inp.value = strategy; }
     } catch (_) {}
   }
@@ -50172,282 +50472,124 @@ document.addEventListener('DOMContentLoaded', function () {
     }
   }
 
+  // -----------------------------------------------------------------------
+  // runCombo -- thin wrapper around skaiExecuteIsolatedRun for compatibility.
+  // All run isolation logic lives inside skaiExecuteIsolatedRun.
+  // -----------------------------------------------------------------------
   function runCombo(combo, onDone) {
-    // Hard reset canonical per-run outputs before starting the next combo so
-    // captureResult() can never inherit stale daily/global payloads from the
-    // previous run when a later run is still warming up.
-    try {
-      window.SKAI_FINAL_PREDICTION_SETS = [];
-      window.SKAI_DAILY_CHOSEN_COMBOS = [];
-      window.SKAI_POS_COMBOS = null;
-      window.__SKAI_FPS_JSON__ = null;
-      window.skaiSaveMainOrdered = [];
-      window.skaiSaveExtraOrdered = [];
-      // Reset per-run blend tracking so captureResult reads fresh values per combo
-      window.__SKAI_SELECTED_BLEND_AI_PCT__ = null;
-      window.__SKAI_EFFECTIVE_BLEND_AI_PCT__ = null;
-      window.__SKAI_BLEND_OPTIMIZED__ = 0;
-      window.__SKAI_ALLOW_BLEND_OPT__ = false;
-      // FIX (daily-batch BUG 2 guard): Clear the auto-generated reproKey stored in
-      // SKAI_SETTINGS after run 1 so that run 2-9 do not inherit run 1's key.
-      // The reproKey will be freshly auto-generated inside runSkaiML from each
-      // combo's current blend/temperature/skipGamma (producing a unique seed per combo).
-      try {
-        if (window.SKAI_SETTINGS) {
-          window.SKAI_SETTINGS.reproKey = null;
-          window.SKAI_SETTINGS.seed     = null;
-        }
-      } catch (_) {}
-      // FIX (daily-batch BUG 3 guard): Clear stability score cache so the EMA from
-      // the previous combo does not pull this combo's digit scores toward the last
-      // combo's results.  SKAI_scoreAndRender resets it fresh on each call (BUG 3
-      // fix above), but clearing it here too makes the guard belt-and-suspenders.
-      try { window.SKAI_lastScoreByNum = {}; } catch (_) {}
-      var _dtcClear = qs('skai-ai-daily-top-combos-json');
-      if (_dtcClear) { _dtcClear.value = ''; }
-      var _tcClear = document.querySelectorAll('input[name="top_combos_json"]');
-      for (var _tcx = 0; _tcx < _tcClear.length; _tcx++) { try { _tcClear[_tcx].value = ''; } catch(_){} }
-    } catch (_) {}
-
-    // Apply the profile hyperparameters (epochs, batchSize, dropout, etc.) and
-    // strategy settings (temperature, diversityPenalty) synchronously so each
-    // combo truly uses different parameters.
-    try {
-      if (typeof window.skaiApplyCombo === 'function') {
-        window.skaiApplyCombo(combo.profile, combo.strategy);
-      } else {
-        selectProfile(combo.profile);
-        selectStrategy(combo.strategy);
-      }
-    } catch (_) {}
-
-    // Log effective settings for this combo so each run can be verified as fresh.
-    // This is visible in the browser console and confirms that a new model is trained
-    // with the correct per-combo hyperparameters (not reusing a cached model).
-    try {
-      var _gvLog = function(id, def) {
-        var el = document.getElementById(id) || document.getElementById(id + '_ui');
-        var v = (el && el.value != null) ? String(el.value).trim() : '';
-        return v !== '' ? v : def;
-      };
-      var _ep  = _gvLog('epochs',         _gvLog('skaiadv_epochs',   '?'));
-      var _bs  = _gvLog('batchSize',       _gvLog('skaiadv_batch',    '?'));
-      var _dr  = _gvLog('dropoutRate',     _gvLog('skaiadv_dropout',  '?'));
-      var _lr  = _gvLog('learningRate',    _gvLog('skaiadv_lr',       '?'));
-      var _tmp = _gvLog('temperature',     _gvLog('skaiadv_temp',     '?'));
-      var _div = _gvLog('diversityPenalty',_gvLog('skaiadv_diversity','?'));
-      console.log('[SKAI batch] Running combo:', combo.label,
-        '| profile=' + combo.profile + ', strategy=' + combo.strategy,
-        '| epochs=' + _ep, 'batchSize=' + _bs, 'dropout=' + _dr,
-        'lr=' + _lr, 'temp=' + _tmp, 'diversity=' + _div
-      );
-      // Update the running cell to confirm fresh parameters at a glance.
-      setCell(combo.profile, combo.strategy,
-        "Training&#8230; (" + _ep + " ep, " + combo.profile + "/" + combo.strategy + ")", "running");
-    } catch (_) {}
-
-    var finished = false;
-    var timeout = null;
-
-    // Dual-gate: wait for BOTH skai:done AND skai:score:done before capturing.
-    //
-    // Why dual-gate?  For games WITHOUT an extra ball (Fantasy Five, Lotto, etc.)
-    // skai:done fires prematurely -- inside fitWithValidation's .then() callback,
-    // right after seed 1 of 3 finishes training.  At that point seeds 2-3 haven't
-    // run yet, and SKAI_scoreAndRender / skaiSaveMainOrdered haven't been called.
-    // skai:score:done fires from SKAI_scoreAndRender AFTER all seeds complete,
-    // inference runs, and skaiSaveMainOrdered is set.
-    //
-    // For games WITH an extra ball (Powerball): skai:score:done fires first (after
-    // main scoring), then skai:done fires last (after extra-ball training + scoring,
-    // which is when skaiSaveExtraOrdered is also set).
-    //
-    // Waiting for BOTH guarantees captureResult() always reads fully-scored picks:
-    //   - Fantasy Five: skai:done first (premature), skai:score:done last (correct)
-    //   - Powerball:    skai:score:done first, skai:done last (correct)
-    var _doneFired      = false;
-    var _scoreDoneFired = false;
-
-    // Per-run snapshots captured at skai:score:done time (inside SKAI_scoreAndRender).
-    // Fixes race condition on multi-module pages: other modules' runCombo() calls clear
-    // window.skaiSaveMainOrdered=[] between skai:score:done and the later skai:done
-    // (extra-ball training gap for EuroMillions/Powerball), leaving captureResult()
-    // with empty globals.  Snapshotting here preserves the values in this closure.
-    var _snapMainNums            = null;
-    var _snapExtraNums           = null;
-    var _snapFpsJson             = null;
-    var _snapDailyChosenCombos   = null;
-    var _snapFinalPredictionSets = null;
-
-    // Held so finish() can cancel it if the 5-min safety net fires first.
-    var _onMlStart = null;
-
-    function finish() {
-      if (finished) { return; }
-      finished = true;
-      try { clearTimeout(timeout); } catch (_) {}
-      // Cancel the skai:ml:start gate if it hasn't fired yet (e.g. 5-min timeout).
-      if (_onMlStart) {
-        try { window.removeEventListener('skai:ml:start', _onMlStart, false); } catch (_) {}
-        _onMlStart = null;
-      }
-      try { console.log('[SKAI batch] combo done: ' + combo.label +
-        ' | doneFired=' + _doneFired + ' scoreDoneFired=' + _scoreDoneFired); } catch (_) {}
-      var res = captureResult(_snapMainNums, _snapExtraNums, _snapFpsJson, _snapDailyChosenCombos, _snapFinalPredictionSets);
+    var runToken = skaiGenerateRunToken();
+    batchState.token = runToken;
+    syncAliases();
+    skaiExecuteIsolatedRun(combo, runToken, function(structured) {
+      // Convert structured result back to the legacy shape expected by runNext.
+      var res = structured.savePayload || {};
+      if (!res.mainNumbers) { res.mainNumbers  = structured.predictedNumbers || []; }
+      if (!res.extraNumbers){ res.extraNumbers  = structured.extraNumbers     || []; }
       onDone(res);
-    }
-
-    function checkAllDone() {
-      if (_doneFired && _scoreDoneFired) { finish(); }
-    }
-
-    // Register skai:done / skai:score:done ONLY after skai:ml:start fires for THIS
-    // combo.  This prevents stale events trailing from the previous combo (e.g. a
-    // delayed skai:score:done from SKAI_scoreAndRender being re-invoked, or slider
-    // input/change events emitted by skaiApplyCombo->applyProfile->updateAdv that
-    // cascade into scoring) from satisfying the dual-gate and calling finish()
-    // before this combo's actual training has even started.
-    function registerCompletionListeners() {
-      if (finished) { return; }
-      window.addEventListener("skai:done", function onSkaiDone() {
-        try { window.removeEventListener("skai:done", onSkaiDone, false); } catch (_) {}
-        _doneFired = true;
-        checkAllDone();
-      }, false);
-      window.addEventListener("skai:score:done", function onScoreDone() {
-        try { window.removeEventListener("skai:score:done", onScoreDone, false); } catch (_) {}
-        // Snapshot shared globals NOW while they are guaranteed valid (we are
-        // synchronously inside SKAI_scoreAndRender's skai:score:done dispatch).
-        // Without this snapshot, a concurrent module's runCombo() can clear
-        // window.skaiSaveMainOrdered=[] before skai:done fires for extra-ball
-        // games (EuroMillions, Powerball), causing captureResult() to save [].
-        try { _snapMainNums = (window.skaiSaveMainOrdered && window.skaiSaveMainOrdered.length) ? window.skaiSaveMainOrdered.slice() : null; } catch(_) {}
-        try { _snapExtraNums = (window.skaiSaveExtraOrdered && window.skaiSaveExtraOrdered.length) ? window.skaiSaveExtraOrdered.slice() : null; } catch(_) {}
-        try { _snapFpsJson = window.__SKAI_FPS_JSON__ || null; } catch(_) {}
-        try { _snapDailyChosenCombos = (window.SKAI_DAILY_CHOSEN_COMBOS && window.SKAI_DAILY_CHOSEN_COMBOS.length) ? window.SKAI_DAILY_CHOSEN_COMBOS.slice() : null; } catch(_) {}
-        try { _snapFinalPredictionSets = (window.SKAI_FINAL_PREDICTION_SETS && window.SKAI_FINAL_PREDICTION_SETS.length) ? window.SKAI_FINAL_PREDICTION_SETS.slice() : null; } catch(_) {}
-        _scoreDoneFired = true;
-        checkAllDone();
-      }, false);
-    }
-
-    // Wait for skai:ml:start -- proof that the current combo's runSkaiML has
-    // begun -- before accepting skai:done / skai:score:done.
-    _onMlStart = function onMlStart() {
-      try { window.removeEventListener('skai:ml:start', _onMlStart, false); } catch (_) {}
-      _onMlStart = null;
-      registerCompletionListeners();
-    };
-    window.addEventListener('skai:ml:start', _onMlStart, false);
-
-    timeout = setTimeout(finish, 300000);
-
-    // Directly invoke the ML runner instead of clicking #startPrediction.
-    // The button-click path goes through arm() which sets arm.__armed=true on
-    // the first run and never resets it, so callAutoTune() is skipped for all
-    // subsequent batch runs and runSkaiML() is never triggered.  Calling
-    // runSkaiML() directly bypasses that broken chain: it manages its own
-    // __SKAI_RUNNING__ flag, fires skai:ml:start (which resets __DONE_MAIN /
-    // __DONE_EXTRA and __SKAI_RUN_ACTIVE__), runs the full ML pipeline, and
-    // fires skai:done when complete.
-    var mlRunner = (typeof window.runSkaiML === 'function') ? window.runSkaiML : null;
-    if (mlRunner) {
-      try {
-        // Clear any stale run locks left over from a previous failed run so
-        // the ML is not blocked on entry.
-        try { window.__SKAI_RUNNING__   = false; } catch(_){}
-        try { window.__SKAI_RUN_ACTIVE__ = false; } catch(_){}
-        mlRunner();
-      } catch (_) {
-        finish();
-      }
-    } else {
-      // Fallback: click the run button (works for run 1 when runSkaiML is not
-      // yet defined, or when the caller has a custom runner wired to the button).
-      var runBtn = qs("startPrediction") || qs("runPrediction");
-      if (!runBtn) {
-        onDone({ html: "(run button not found)", text: "(run button not found)" });
-        return;
-      }
-      try {
-        if (typeof runBtn.click === "function") { runBtn.click(); }
-        else {
-          var ev = document.createEvent("MouseEvents");
-          ev.initEvent("click", true, true);
-          runBtn.dispatchEvent(ev);
-        }
-      } catch (_) {
-        finish();
-      }
-    }
+    });
   }
 
+  // -----------------------------------------------------------------------
+  // runNext -- pulls the next combo from the queue and executes it.
+  // Respects pause, stop, and token guards.
+  // -----------------------------------------------------------------------
   function runNext() {
-    if (batchStopped || batchIndex >= BATCH_COMBOS.length) {
+    if (batchState.stopped || batchState.index >= BATCH_COMBOS.length) {
       onBatchEnd();
       return;
     }
-    var combo = BATCH_COMBOS[batchIndex];
-    setCell(combo.profile, combo.strategy, "Running...", "running");
-    setCurrentLabel(combo.label);
-    var idx = batchIndex;
-    batchIndex += 1;
+    // Pause gate: hold execution until resume() is called.
+    if (batchState.paused) {
+      batchState.pauseResume = function() { runNext(); };
+      return;
+    }
 
-    runCombo(combo, function (res) {
-      if (batchStopped) {
+    var combo = BATCH_COMBOS[batchState.index];
+    setCell(combo.profile, combo.strategy, 'Running...', 'running');
+    setCurrentLabel(combo.label);
+    var idx = batchState.index;
+    batchState.index += 1;
+    syncAliases();
+
+    // Generate unique run token -- one per combo, validated in all callbacks.
+    var runToken = skaiGenerateRunToken();
+    batchState.token = runToken;
+    syncAliases();
+
+    try {
+      console.log('[SKAI batch] Starting combo:', combo.label,
+        '| token=' + runToken,
+        '| profile=' + combo.profile + ', strategy=' + combo.strategy);
+    } catch (_) {}
+
+    skaiExecuteIsolatedRun(combo, runToken, function(structured) {
+      // Token guard: discard stale completions.
+      if (structured.runToken !== runToken) { return; }
+
+      if (batchState.stopped) {
         onBatchEnd();
         return;
       }
-      batchResults[idx] = { combo: combo, html: res.html, text: res.text, done: true,
-                            mainNumbers: res.mainNumbers || [], extraNumbers: res.extraNumbers || [],
-                            finalPredictionSets: res.finalPredictionSets || [],
-                            fpsJson: res.fpsJson || '', dailyChosenCombos: res.dailyChosenCombos || [],
-                            // FIX: store dailyExtraDigits and dailyTopExtras so saveAllSequential()
-                            // can restore the per-run bonus digits for daily lottery batch saves.
-                            // Without these, r.dailyExtraDigits is undefined during restore and
-                            // SKAI_DAILY_EXTRA_DIGITS is cleared to [] → bonus digits are lost.
-                            dailyExtraDigits: res.dailyExtraDigits || [], dailyTopExtras: res.dailyTopExtras || [],
-                            blendAiPct: (typeof res.blendAiPct === 'number') ? res.blendAiPct : null,
-                            blendSkipPct: null,
-                            blendLabel: res.blendLabel || '',
-                            selectedBlendAiPct:  (typeof res.selectedBlendAiPct  === 'number') ? res.selectedBlendAiPct  : null,
-                            effectiveBlendAiPct: (typeof res.effectiveBlendAiPct === 'number') ? res.effectiveBlendAiPct : null,
-                            blendOptimized:      res.blendOptimized  ? 1 : 0,
-                            allowBlendOpt:       res.allowBlendOpt   ? 1 : 0,
-                            temperature: (typeof res.temperature === 'number') ? res.temperature : null,
-                            diversityPenalty: (typeof res.diversityPenalty === 'number') ? res.diversityPenalty : null,
-                            settingsSnapshot: res.settingsSnapshot || null };
+
+      var res = structured.savePayload || {};
+      batchResults[idx] = {
+        combo:               combo,
+        html:                res.html  || '',
+        text:                res.text  || '',
+        done:                true,
+        status:              structured.success ? 'completed' : 'failed',
+        runToken:            runToken,
+        lotteryKey:          structured.lotteryKey || '',
+        presetKey:           structured.presetKey  || '',
+        mainNumbers:         structured.predictedNumbers || [],
+        extraNumbers:        structured.extraNumbers     || [],
+        bonusNumbers:        structured.bonusNumbers     || [],
+        finalPredictionSets: res.finalPredictionSets || [],
+        fpsJson:             res.fpsJson || '',
+        dailyChosenCombos:   res.dailyChosenCombos  || [],
+        dailyExtraDigits:    res.dailyExtraDigits   || [],
+        dailyTopExtras:      res.dailyTopExtras     || [],
+        blendAiPct:          (typeof res.blendAiPct         === 'number') ? res.blendAiPct         : null,
+        blendSkipPct:        null,
+        blendLabel:          res.blendLabel || '',
+        selectedBlendAiPct:  (typeof res.selectedBlendAiPct  === 'number') ? res.selectedBlendAiPct  : null,
+        effectiveBlendAiPct: (typeof res.effectiveBlendAiPct === 'number') ? res.effectiveBlendAiPct : null,
+        blendOptimized:      res.blendOptimized ? 1 : 0,
+        allowBlendOpt:       res.allowBlendOpt  ? 1 : 0,
+        temperature:         (typeof res.temperature      === 'number') ? res.temperature      : null,
+        diversityPenalty:    (typeof res.diversityPenalty === 'number') ? res.diversityPenalty : null,
+        settingsSnapshot:    res.settingsSnapshot || null,
+        timestamps:          structured.timestamps || {}
+      };
       persistResults();
-      batchDoneCount += 1;
+      batchState.doneCount += 1;
+      syncAliases();
       updateProgress();
+
       var _doneLabel = res.blendLabel || '';
       var viewHtml = "<span style='color:#16a34a;font-weight:600;'>Done</span>";
       if (_doneLabel) {
-        // Show optimization indicator when blend was engine-adjusted
         var _doneOptimized = (res.blendOptimized && res.allowBlendOpt &&
-                              typeof res.selectedBlendAiPct === 'number' &&
-                              typeof res.effectiveBlendAiPct === 'number' &&
-                              res.effectiveBlendAiPct !== res.selectedBlendAiPct);
+          typeof res.selectedBlendAiPct === 'number' &&
+          typeof res.effectiveBlendAiPct === 'number' &&
+          res.effectiveBlendAiPct !== res.selectedBlendAiPct);
         if (_doneOptimized) {
-          viewHtml += " <span style='font-size:0.75rem;color:#475569;' title='Selected: " + res.selectedBlendAiPct + "% \u2014 Optimized: " + res.effectiveBlendAiPct + "%'>" + _doneLabel + " <span style='color:#d97706;font-style:italic;'>*opt</span></span>";
+          viewHtml += " <span style='font-size:0.75rem;color:#475569;'>" + _doneLabel +
+                      " <span style='color:#d97706;font-style:italic;'>*opt</span></span>";
         } else {
           viewHtml += " <span style='font-size:0.75rem;color:#475569;'>" + _doneLabel + "</span>";
         }
       }
       viewHtml += " <a href='#' style='font-size:0.8rem;margin-left:4px;' data-batch-view='" + idx + "'>View</a>";
-      setCell(combo.profile, combo.strategy, viewHtml, "done");
+      setCell(combo.profile, combo.strategy, viewHtml, 'done');
 
-      // Save this exact run immediately before the next run starts so the
-      // per-run main numbers and extra numbers cannot be overwritten by the
-      // next batch iteration's shared fields.
-      saveAllSequential([idx], function (_saveResult) {
-        if (batchStopped) {
-          onBatchEnd();
-          return;
-        }
+      // Auto-save immediately before the next run starts.
+      saveAllSequential([idx], function(_saveResult) {
+        if (batchState.stopped) { onBatchEnd(); return; }
         if (_saveResult && _saveResult.ok === false) {
-          batchStopped = true;
-          batchRunning = false;
+          batchState.stopped = true;
+          batchState.running = false;
+          syncAliases();
           onBatchEnd();
           return;
         }
@@ -50456,34 +50598,42 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
+  // -----------------------------------------------------------------------
+  // onBatchEnd -- called when queue is exhausted or batch is stopped.
+  // -----------------------------------------------------------------------
   function onBatchEnd() {
-    batchRunning = false;
-    setCurrentLabel(batchStopped ? "Batch stopped." : "All runs complete.");
+    batchState.running = false;
+    batchState.paused  = false;
+    syncAliases();
+    setPauseButtonLabel(false);
+    setCurrentLabel(batchState.stopped ? 'Batch stopped.' : 'All runs complete.');
     updateProgress();
-    try { console.log('[SKAI batch] onBatchEnd: ' + batchDoneCount + '/' + BATCH_COMBOS.length + ' combos done, stopped=' + batchStopped); } catch(_) {}
-    var saveRow = qs("skai-batch-save-row");
-    // Show save row only when all combos genuinely finished OR the user stopped
-    // the batch (partial results).  The previous condition (batchDoneCount > 0)
-    // could show the button too early if onBatchEnd was reached before all
-    // combos reported done -- this version requires all 9 to complete first.
-    if (saveRow && batchDoneCount > 0 && (batchStopped || batchDoneCount >= BATCH_COMBOS.length)) {
-      // Update the save-row note to accurately reflect full vs partial completion.
-      var saveNote = qs("skai-batch-save-completion-note");
+    try {
+      console.log('[SKAI batch] onBatchEnd: ' + batchState.doneCount + '/' + BATCH_COMBOS.length +
+        ' combos done, stopped=' + batchState.stopped);
+    } catch (_) {}
+    var saveRow = qs('skai-batch-save-row');
+    if (saveRow && batchState.doneCount > 0 &&
+        (batchState.stopped || batchState.doneCount >= BATCH_COMBOS.length)) {
+      var saveNote = qs('skai-batch-save-completion-note');
       if (saveNote) {
-        if (batchStopped && batchDoneCount < BATCH_COMBOS.length) {
-          saveNote.innerHTML = "<strong>\u26a0\ufe0f Batch was stopped early.</strong> Only <strong>" + batchDoneCount + " of " + BATCH_COMBOS.length + "</strong> runs completed. The completed runs were saved automatically. Use <strong>Re-save Selected</strong> if you need to save them again.";
-          saveNote.style.color = "#92400e";
-          saveNote.style.background = "#fffbeb";
-          saveNote.style.borderColor = "#fcd34d";
+        if (batchState.stopped && batchState.doneCount < BATCH_COMBOS.length) {
+          saveNote.innerHTML = '<strong>Batch was stopped early.</strong> Only <strong>' +
+            batchState.doneCount + ' of ' + BATCH_COMBOS.length + '</strong> runs completed. ' +
+            'The completed runs were saved automatically. Use <strong>Re-save Selected</strong> if needed.';
+          saveNote.style.color       = '#92400e';
+          saveNote.style.background  = '#fffbeb';
+          saveNote.style.borderColor = '#fcd34d';
         } else {
-          saveNote.innerHTML = "<strong>\u2705 All " + BATCH_COMBOS.length + " runs are done and were saved automatically to your dashboard.</strong> Use <strong>Re-save All</strong> or <strong>Re-save Selected</strong> only if you need to save them again.";
-          saveNote.style.color = "#065f46";
-          saveNote.style.background = "#f0fdf4";
-          saveNote.style.borderColor = "#bbf7d0";
+          saveNote.innerHTML = '<strong>All ' + BATCH_COMBOS.length +
+            ' runs are done and were saved automatically to your dashboard.</strong> ' +
+            'Use <strong>Re-save All</strong> or <strong>Re-save Selected</strong> only if needed.';
+          saveNote.style.color       = '#065f46';
+          saveNote.style.background  = '#f0fdf4';
+          saveNote.style.borderColor = '#bbf7d0';
         }
       }
-      saveRow.style.display = "flex";
-      // Show Engine-Optimized Blend legend if any result was truly optimized
+      saveRow.style.display = 'flex';
       try {
         var _legend = qs('skai-blend-opt-legend');
         if (_legend) {
@@ -50491,17 +50641,20 @@ document.addEventListener('DOMContentLoaded', function () {
           for (var _oli = 0; _oli < batchResults.length; _oli++) {
             var _olr = batchResults[_oli];
             if (_olr && _olr.blendOptimized && _olr.allowBlendOpt &&
-                typeof _olr.selectedBlendAiPct === 'number' && typeof _olr.effectiveBlendAiPct === 'number' &&
+                typeof _olr.selectedBlendAiPct === 'number' &&
+                typeof _olr.effectiveBlendAiPct === 'number' &&
                 _olr.effectiveBlendAiPct !== _olr.selectedBlendAiPct) {
               _anyOpt = true; break;
             }
           }
           _legend.style.display = _anyOpt ? 'block' : 'none';
         }
-      } catch(_) {}
+      } catch (_) {}
     }
-    var stopBtn = qs("skai-batch-stop");
+    var stopBtn = qs('skai-batch-stop');
     if (stopBtn) { stopBtn.disabled = true; }
+    var pauseBtn = qs('skai-batch-pause');
+    if (pauseBtn) { pauseBtn.disabled = true; }
   }
 
   function resetGrid() {
@@ -50875,157 +51028,203 @@ document.addEventListener('DOMContentLoaded', function () {
     }
   }
 
+  // -----------------------------------------------------------------------
+  // wireButtons -- event wiring for all batch panel controls.
+  // Includes: launch, confirm, cancel, stop, pause/resume, clear, detail, save.
+  // -----------------------------------------------------------------------
   function wireButtons() {
-    var launchBtn = qs("skai-batch-launch");
-    var modal = qs("skai-batch-modal");
-    var confirmBtn = qs("skai-batch-confirm");
-    var cancelBtn = qs("skai-batch-cancel");
-    var stopBtn = qs("skai-batch-stop");
-    var clearBtn = qs("skai-batch-clear");
-    var detailClose = qs("skai-batch-detail-close");
-    var saveAllBtn = qs("skai-batch-save-all");
-    var saveSelBtn = qs("skai-batch-save-selected");
+    var launchBtn   = qs('skai-batch-launch');
+    var modal       = qs('skai-batch-modal');
+    var confirmBtn  = qs('skai-batch-confirm');
+    var cancelBtn   = qs('skai-batch-cancel');
+    var stopBtn     = qs('skai-batch-stop');
+    var pauseBtn    = qs('skai-batch-pause');
+    var clearBtn    = qs('skai-batch-clear');
+    var detailClose = qs('skai-batch-detail-close');
+    var saveAllBtn  = qs('skai-batch-save-all');
+    var saveSelBtn  = qs('skai-batch-save-selected');
 
     if (launchBtn) {
-      launchBtn.addEventListener("click", function () {
+      launchBtn.addEventListener('click', function () {
         if (launchBtn.disabled || launchBtn.getAttribute('aria-disabled') === 'true') { return; }
-        if (modal) { modal.style.display = "flex"; }
+        if (modal) { modal.style.display = 'flex'; }
       }, false);
     }
 
     if (cancelBtn) {
-      cancelBtn.addEventListener("click", function () {
-        if (modal) { modal.style.display = "none"; }
+      cancelBtn.addEventListener('click', function () {
+        if (modal) { modal.style.display = 'none'; }
       }, false);
     }
 
     if (modal) {
-      modal.addEventListener("click", function (e) {
-        if (e.target === modal) { modal.style.display = "none"; }
+      modal.addEventListener('click', function (e) {
+        if (e.target === modal) { modal.style.display = 'none'; }
       }, false);
     }
 
     if (confirmBtn) {
-      confirmBtn.addEventListener("click", function () {
+      confirmBtn.addEventListener('click', function () {
         hideModal();
-        if (batchRunning) { return; }
-        batchRunning = true;
-        batchStopped = false;
-        batchIndex = 0;
-        batchDoneCount = 0;
+        // Guard: prevent duplicate batch start.
+        if (batchState.running) { return; }
+        // Reset batch state fully before starting.
+        batchState.running   = true;
+        batchState.paused    = false;
+        batchState.stopped   = false;
+        batchState.index     = 0;
+        batchState.doneCount = 0;
+        batchState.token     = null;
+        batchState.pauseResume = null;
         batchResults = [];
-        try { console.log('[SKAI batch] BATCH RUN START: ' + BATCH_COMBOS.length + ' combos queued'); } catch(_) {}
-        var saveRow = qs("skai-batch-save-row");
-        if (saveRow) { saveRow.style.display = "none"; }
-        var stopBtn2 = qs("skai-batch-stop");
+        syncAliases();
+        try {
+          console.log('[SKAI batch] BATCH RUN START: ' + BATCH_COMBOS.length + ' combos queued');
+        } catch (_) {}
+        var saveRow = qs('skai-batch-save-row');
+        if (saveRow) { saveRow.style.display = 'none'; }
+        var stopBtn2 = qs('skai-batch-stop');
         if (stopBtn2) { stopBtn2.disabled = false; }
-        var detailEl = qs("skai-batch-detail");
-        if (detailEl) { detailEl.style.display = "none"; }
+        if (pauseBtn) { pauseBtn.disabled = false; setPauseButtonLabel(false); }
+        var detailEl = qs('skai-batch-detail');
+        if (detailEl) { detailEl.style.display = 'none'; }
         resetGrid();
         showPanel();
         updateProgress();
-        setCurrentLabel("Starting...");
+        setCurrentLabel('Starting...');
         setTimeout(runNext, 400);
       }, false);
     }
 
     if (stopBtn) {
-      stopBtn.addEventListener("click", function () {
-        batchStopped = true;
-        batchRunning = false;
-        setCurrentLabel("Stopping...");
+      stopBtn.addEventListener('click', function () {
+        batchState.stopped = true;
+        batchState.running = false;
+        batchState.paused  = false;
+        batchState.pauseResume = null;
+        syncAliases();
+        if (pauseBtn) { pauseBtn.disabled = true; setPauseButtonLabel(false); }
+        setCurrentLabel('Stopping...');
+      }, false);
+    }
+
+    if (pauseBtn) {
+      pauseBtn.addEventListener('click', function () {
+        if (!batchState.running && !batchState.paused) { return; }
+        if (batchState.paused) {
+          // Resume: restore running state and continue queue.
+          batchState.paused  = false;
+          batchState.running = true;
+          syncAliases();
+          setPauseButtonLabel(false);
+          setCurrentLabel('Resumed...');
+          updateProgress();
+          if (typeof batchState.pauseResume === 'function') {
+            var resume = batchState.pauseResume;
+            batchState.pauseResume = null;
+            setTimeout(resume, 100);
+          }
+        } else {
+          // Pause: stop queue after current run completes.
+          batchState.paused  = true;
+          batchState.running = true; // still "active", just paused between runs
+          syncAliases();
+          setPauseButtonLabel(true);
+          setCurrentLabel('Pausing after current run...');
+          updateProgress();
+        }
       }, false);
     }
 
     if (clearBtn) {
-      clearBtn.addEventListener("click", function () {
-        batchStopped = true;
-        batchRunning = false;
+      clearBtn.addEventListener('click', function () {
+        batchState.stopped     = true;
+        batchState.running     = false;
+        batchState.paused      = false;
+        batchState.index       = 0;
+        batchState.doneCount   = 0;
+        batchState.token       = null;
+        batchState.pauseResume = null;
         batchResults = [];
-        batchDoneCount = 0;
-        batchIndex = 0;
-        try { sessionStorage.removeItem(STORAGE_KEY); } catch (_) {}
+        syncAliases();
+        try { sessionStorage.removeItem(SESSION_KEY); } catch (_) {}
+        try { localStorage.removeItem(LS_STATE_KEY); } catch (_) {}
         resetGrid();
         updateProgress();
-        setCurrentLabel("Ready");
-        var detail2 = qs("skai-batch-detail");
-        if (detail2) { detail2.style.display = "none"; }
-        var saveRow2 = qs("skai-batch-save-row");
-        if (saveRow2) { saveRow2.style.display = "none"; }
+        setCurrentLabel('Ready');
+        if (pauseBtn) { pauseBtn.disabled = true; setPauseButtonLabel(false); }
+        var detail2 = qs('skai-batch-detail');
+        if (detail2) { detail2.style.display = 'none'; }
+        var saveRow2 = qs('skai-batch-save-row');
+        if (saveRow2) { saveRow2.style.display = 'none'; }
       }, false);
     }
 
     if (detailClose) {
-      detailClose.addEventListener("click", function () {
-        var d = qs("skai-batch-detail");
-        if (d) { d.style.display = "none"; }
+      detailClose.addEventListener('click', function () {
+        var d = qs('skai-batch-detail');
+        if (d) { d.style.display = 'none'; }
       }, false);
     }
 
-    var grid = qs("skai-batch-grid");
+    var grid = qs('skai-batch-grid');
     if (grid) {
-      grid.addEventListener("click", function (e) {
+      grid.addEventListener('click', function (e) {
         var t = e.target;
-        if (t && t.getAttribute("data-batch-view") !== null) {
+        if (t && t.getAttribute('data-batch-view') !== null) {
           try { e.preventDefault(); } catch (_) {}
-          openDetail(parseInt(t.getAttribute("data-batch-view"), 10));
+          openDetail(parseInt(t.getAttribute('data-batch-view'), 10));
         }
       }, false);
     }
 
     if (saveAllBtn) {
-      saveAllBtn.addEventListener("click", function () {
-        if (!window.confirm("This will re-save each completed run to your dashboard. Runs that were already auto-saved will be saved again. Continue?")) { return; }
+      saveAllBtn.addEventListener('click', function () {
+        if (!window.confirm('This will re-save each completed run to your dashboard. Runs that were already auto-saved will be saved again. Continue?')) { return; }
         var indices = [];
         for (var i = 0; i < batchResults.length; i++) {
           if (batchResults[i] && batchResults[i].done) { indices.push(i); }
         }
-        if (indices.length === 0) {
-          alert("No completed runs to save.");
-          return;
-        }
+        if (indices.length === 0) { alert('No completed runs to save.'); return; }
         var saveAllTotal = indices.length;
         saveAllSequential(indices, function () {
-          setBatchSaveStatus("All " + saveAllTotal + " runs saved.");
-          setCurrentLabel("All " + saveAllTotal + " runs saved.");
-          if (window.skaiShowSaveToast) { window.skaiShowSaveToast("All " + saveAllTotal + " runs saved."); }
+          setBatchSaveStatus('All ' + saveAllTotal + ' runs saved.');
+          setCurrentLabel('All ' + saveAllTotal + ' runs saved.');
+          if (window.skaiShowSaveToast) { window.skaiShowSaveToast('All ' + saveAllTotal + ' runs saved.'); }
         }, 1, saveAllTotal);
       }, false);
     }
 
     if (saveSelBtn) {
-      saveSelBtn.addEventListener("click", function () {
+      saveSelBtn.addEventListener('click', function () {
         var available = [];
         for (var i = 0; i < batchResults.length; i++) {
           if (batchResults[i] && batchResults[i].done) { available.push(i); }
         }
-        if (available.length === 0) {
-          alert("No completed runs to save.");
-          return;
-        }
+        if (available.length === 0) { alert('No completed runs to save.'); return; }
         var labels = [];
         for (var j = 0; j < available.length; j++) {
-          labels.push((j + 1) + ". " + batchResults[available[j]].combo.label);
+          labels.push((j + 1) + '. ' + batchResults[available[j]].combo.label);
         }
         var input = window.prompt(
-          "Enter the numbers (comma-separated) of the runs you want to save:\n\n" + labels.join("\n"),
-          "1"
+          'Enter the numbers (comma-separated) of the runs you want to save:\n\n' + labels.join('\n'),
+          '1'
         );
         if (!input) { return; }
         var chosen = [];
-        var parts = input.split(",");
+        var parts = input.split(',');
         for (var k = 0; k < parts.length; k++) {
           var n = parseInt(parts[k].trim(), 10);
           if (!isNaN(n) && n >= 1 && n <= available.length) {
             chosen.push(available[n - 1]);
           }
         }
-        if (chosen.length === 0) { alert("No valid selections."); return; }
+        if (chosen.length === 0) { alert('No valid selections.'); return; }
         var saveSelTotal = chosen.length;
         saveAllSequential(chosen, function () {
-          setBatchSaveStatus(saveSelTotal + " run" + (saveSelTotal === 1 ? "" : "s") + " saved.");
-          setCurrentLabel(saveSelTotal + " run" + (saveSelTotal === 1 ? "" : "s") + " saved.");
-          if (window.skaiShowSaveToast) { window.skaiShowSaveToast(saveSelTotal + " run" + (saveSelTotal === 1 ? "" : "s") + " saved."); }
+          setBatchSaveStatus(saveSelTotal + ' run' + (saveSelTotal === 1 ? '' : 's') + ' saved.');
+          setCurrentLabel(saveSelTotal + ' run' + (saveSelTotal === 1 ? '' : 's') + ' saved.');
+          if (window.skaiShowSaveToast) { window.skaiShowSaveToast(saveSelTotal + ' run' + (saveSelTotal === 1 ? '' : 's') + ' saved.'); }
         }, 1, saveSelTotal);
       }, false);
     }
@@ -51036,14 +51235,14 @@ document.addEventListener('DOMContentLoaded', function () {
       var saved = loadPersistedResults();
       if (!saved || saved.length === 0) { return; }
       batchResults = saved;
-      batchDoneCount = 0;
+      batchState.doneCount = 0;
       var hasAny = false;
       for (var i = 0; i < saved.length; i++) {
         var r = saved[i];
         if (!r || !r.combo) { continue; }
         if (r.done) {
           hasAny = true;
-          batchDoneCount += 1;
+          batchState.doneCount += 1;
           var _rlabel = r.blendLabel || '';
           var viewHtml = "<span style='color:#16a34a;font-weight:600;'>Done</span>";
           if (_rlabel) {
@@ -51062,12 +51261,12 @@ document.addEventListener('DOMContentLoaded', function () {
         }
       }
       if (hasAny) {
+        syncAliases();
         showPanel();
         updateProgress();
-        setCurrentLabel("Restored from last session.");
-        var saveRow = qs("skai-batch-save-row");
-        if (saveRow) { saveRow.style.display = "flex"; }
-        // Show Engine-Optimized Blend legend if any restored row was optimized
+        setCurrentLabel('Restored from last session.');
+        var saveRow = qs('skai-batch-save-row');
+        if (saveRow) { saveRow.style.display = 'flex'; }
         try {
           var _rLegend = qs('skai-blend-opt-legend');
           if (_rLegend) {
@@ -51075,27 +51274,40 @@ document.addEventListener('DOMContentLoaded', function () {
             for (var _roi = 0; _roi < batchResults.length; _roi++) {
               var _ror = batchResults[_roi];
               if (_ror && _ror.blendOptimized && _ror.allowBlendOpt &&
-                  typeof _ror.selectedBlendAiPct === 'number' && typeof _ror.effectiveBlendAiPct === 'number' &&
+                  typeof _ror.selectedBlendAiPct === 'number' &&
+                  typeof _ror.effectiveBlendAiPct === 'number' &&
                   _ror.effectiveBlendAiPct !== _ror.selectedBlendAiPct) {
                 _rAnyOpt = true; break;
               }
             }
             _rLegend.style.display = _rAnyOpt ? 'block' : 'none';
           }
-        } catch(_) {}
+        } catch (_) {}
       }
     } catch (_) {}
   }
 
+  // -----------------------------------------------------------------------
+  // init -- entry point. Wires buttons; clears any stale session results
+  // on fresh page load so the grid always starts clean.
+  // Also exposes skaiResetRunState and skaiExecuteIsolatedRun on window
+  // for external callers (manual run compatibility).
+  // -----------------------------------------------------------------------
   function init() {
     wireButtons();
-    // Clear any batch results persisted from the previous session so that every
-    // page load always starts with a clean, empty grid.
-    try { sessionStorage.removeItem(STORAGE_KEY); } catch (_) {}
+    // Clear stale session results on every fresh page load.
+    try { sessionStorage.removeItem(SESSION_KEY); } catch (_) {}
+    // Expose required named functions to window for external callers.
+    window.skaiResetRunState      = skaiResetRunState;
+    window.skaiExecuteIsolatedRun = skaiExecuteIsolatedRun;
+    window.skaiGenerateRunToken   = skaiGenerateRunToken;
+    // Disable pause button initially (no batch running).
+    var pauseBtn = qs('skai-batch-pause');
+    if (pauseBtn) { pauseBtn.disabled = true; }
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init, {once: true});
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init, { once: true });
   } else {
     init();
   }
