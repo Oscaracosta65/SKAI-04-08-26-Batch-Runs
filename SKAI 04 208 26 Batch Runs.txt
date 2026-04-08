@@ -50814,6 +50814,24 @@ document.addEventListener('DOMContentLoaded', function () {
           ? _dcSrc[0].replace(/[^0-9]/g, '').split('').map(function(d){ return parseInt(d,10); })
           : normalizeNumericArray(_dcSrc);
       }
+      // [FIX-BATCH-DAILY-SAVE] If r.dailyChosenCombos was empty, _dailyStrings was not
+      // built in the loop above.  Derive display strings from r.mainNumbers (if they are
+      // already formatted as display strings, e.g. ['012','345']) or by joining _dcPrimary
+      // digits.  _dailyStrings drives daily_top_combos_json, which PHP checks first to set
+      // $isDailyGamePosted = true.  Without it, $norm() strips digit 0 for non-daily games,
+      // leaving $mainArr empty for all-zero combos (e.g. Pick 3 "000") and returning
+      // {"ok":false,"reason":"empty_main_numbers"} for every batch save on daily games.
+      if (!_dailyStrings.length) {
+        if (r.mainNumbers && r.mainNumbers.length && typeof r.mainNumbers[0] === 'string') {
+          for (var _bfMnIdx = 0; _bfMnIdx < r.mainNumbers.length && _dailyStrings.length < 5; _bfMnIdx++) {
+            var _bfDsStr = r.mainNumbers[_bfMnIdx].replace(/[^0-9]/g, '');
+            if (_bfDsStr) { _dailyStrings.push(_bfDsStr); }
+          }
+        }
+        if (!_dailyStrings.length && _dcPrimary.length >= 2) {
+          _dailyStrings.push(_dcPrimary.join(''));
+        }
+      }
       _mainNums = _dcPrimary.slice();
     } else {
       _mainNums = (r.mainNumbers && r.mainNumbers.length) ? r.mainNumbers.slice() : [];
@@ -50836,7 +50854,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // 2. Build numbers_json payload
     var _njPayload = { main_numbers: _mainNums, extra_numbers: _extraNums };
-    if (_bfIsDaily && r.dailyChosenCombos && r.dailyChosenCombos.length) {
+    if (_bfIsDaily && _dailyStrings.length) {
       var _bfBonusDigits = (r.dailyExtraDigits && r.dailyExtraDigits.length) ? r.dailyExtraDigits.slice(0, 3) : [];
       _njPayload.main_numbers               = _dailyStrings.slice();
       // [FIX-BATCH-BONUS] Also place bonus digits in extra_numbers so PHP reads them
@@ -50882,10 +50900,24 @@ document.addEventListener('DOMContentLoaded', function () {
     _payload['main_numbers_csv']       = _mainNums.join(',');
     _payload['extra_ball_numbers_csv'] = _extraNums.join(',');
     if (r.fpsJson) { _payload['top_combos_json'] = r.fpsJson; }
-    if (_bfIsDaily && r.dailyChosenCombos && r.dailyChosenCombos.length) {
+    if (_bfIsDaily && _dailyStrings.length) {
       _payload['main_numbers']     = JSON.stringify(_dailyStrings.slice());
       _payload['main_numbers_csv'] = _dailyStrings.join(',');
-      try { _payload['daily_top_combos_json'] = JSON.stringify(r.dailyChosenCombos); } catch(_) {}
+      if (r.dailyChosenCombos && r.dailyChosenCombos.length) {
+        try { _payload['daily_top_combos_json'] = JSON.stringify(r.dailyChosenCombos); } catch(_) {}
+      } else {
+        // Derive a minimal daily_top_combos_json from _dailyStrings so that PHP's
+        // direct check (!empty($dailyTopCombsStr)) sets $isDailyGamePosted = true
+        // unconditionally -- regardless of lottery-config key names.
+        var _dtcMin = [];
+        for (var _dtmi = 0; _dtmi < _dailyStrings.length; _dtmi++) {
+          var _dtmDigits = [];
+          var _dtmStr = _dailyStrings[_dtmi];
+          for (var _dtmc = 0; _dtmc < _dtmStr.length; _dtmc++) { _dtmDigits.push(parseInt(_dtmStr[_dtmc], 10)); }
+          _dtcMin.push({ rank: _dtmi + 1, combo: _dtmDigits, display: _dtmStr, score: 0 });
+        }
+        try { _payload['daily_top_combos_json'] = JSON.stringify(_dtcMin); } catch(_) {}
+      }
       // [FIX-BATCH-BONUS] Ensure bonus digits reach PHP $extraArr via extra_ball_numbers
       if (_bfBonusDigits && _bfBonusDigits.length) {
         _payload['extra_ball_numbers']     = JSON.stringify(_bfBonusDigits.slice());
