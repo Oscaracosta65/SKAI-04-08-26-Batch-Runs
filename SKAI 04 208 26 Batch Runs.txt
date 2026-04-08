@@ -49970,7 +49970,11 @@ document.addEventListener('DOMContentLoaded', function () {
     function finish() {
       if (finished) { return; }
       // Token guard: reject stale callbacks from previous runs.
-      if (runToken !== batchState.token) { return; }
+      // Only applied when a batch run is active (batchState.token !== null).
+      // When batchState.token is null (no batch running, e.g. external/manual
+      // caller of window.skaiExecuteIsolatedRun), the guard is bypassed so
+      // onComplete fires correctly.
+      if (batchState.token !== null && runToken !== batchState.token) { return; }
       finished = true;
       try { clearTimeout(safetyTimer); } catch (_) {}
       if (_onMlStart) {
@@ -50473,19 +50477,22 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   // -----------------------------------------------------------------------
-  // runCombo -- thin wrapper around skaiExecuteIsolatedRun for compatibility.
-  // All run isolation logic lives inside skaiExecuteIsolatedRun.
+  // runCombo -- retained for any legacy callers that may reference this name.
+  // All run logic is now fully implemented in skaiExecuteIsolatedRun.
+  // runNext calls skaiExecuteIsolatedRun directly and is the canonical path.
   // -----------------------------------------------------------------------
   function runCombo(combo, onDone) {
+    // Generate a fresh token for this call.  Set batchState.token so the
+    // token guard inside skaiExecuteIsolatedRun.finish() passes correctly.
     var runToken = skaiGenerateRunToken();
     batchState.token = runToken;
     syncAliases();
     skaiExecuteIsolatedRun(combo, runToken, function(structured) {
-      // Convert structured result back to the legacy shape expected by runNext.
+      // Convert structured result back to the legacy shape expected by callers.
       var res = structured.savePayload || {};
       if (!res.mainNumbers) { res.mainNumbers  = structured.predictedNumbers || []; }
       if (!res.extraNumbers){ res.extraNumbers  = structured.extraNumbers     || []; }
-      onDone(res);
+      if (typeof onDone === 'function') { onDone(res); }
     });
   }
 
@@ -51098,6 +51105,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     if (stopBtn) {
       stopBtn.addEventListener('click', function () {
+        var _wasPaused = batchState.paused;
         batchState.stopped = true;
         batchState.running = false;
         batchState.paused  = false;
@@ -51105,6 +51113,11 @@ document.addEventListener('DOMContentLoaded', function () {
         syncAliases();
         if (pauseBtn) { pauseBtn.disabled = true; setPauseButtonLabel(false); }
         setCurrentLabel('Stopping...');
+        // If the batch was paused between runs (no active run in flight),
+        // onBatchEnd() will never be called by a run-completion callback.
+        // Call it directly here so the UI updates correctly (progress text,
+        // save row, button states).
+        if (_wasPaused) { onBatchEnd(); }
       }, false);
     }
 
