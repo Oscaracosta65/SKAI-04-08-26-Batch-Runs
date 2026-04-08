@@ -49833,6 +49833,7 @@ document.addEventListener('DOMContentLoaded', function () {
     stopped:     false,
     index:       0,
     doneCount:   0,
+    failCount:   0,          // runs that completed but returned no main numbers
     token:       null,       // active run token -- changes each run
     pauseResume: null        // stored callback for resume
   };
@@ -49840,16 +49841,18 @@ document.addEventListener('DOMContentLoaded', function () {
 
   // Back-compat aliases used by saveAllSequential and legacy paths.
   // These mirror batchState and are kept in sync on every write.
-  var batchRunning  = false;
-  var batchStopped  = false;
-  var batchIndex    = 0;
+  var batchRunning   = false;
+  var batchStopped   = false;
+  var batchIndex     = 0;
   var batchDoneCount = 0;
+  var batchFailCount = 0;
 
   function syncAliases() {
     batchRunning   = batchState.running;
     batchStopped   = batchState.stopped;
     batchIndex     = batchState.index;
     batchDoneCount = batchState.doneCount;
+    batchFailCount = batchState.failCount;
   }
 
   // -----------------------------------------------------------------------
@@ -50139,6 +50142,7 @@ document.addEventListener('DOMContentLoaded', function () {
         stopped:   batchState.stopped,
         index:     batchState.index,
         doneCount: batchState.doneCount,
+        failCount: batchState.failCount,
         ts:        Date.now()
       }));
     } catch (_) {}
@@ -50170,17 +50174,21 @@ document.addEventListener('DOMContentLoaded', function () {
   function updateProgress() {
     var pt = qs('skai-batch-progress-text');
     if (!pt) { return; }
-    var total = BATCH_COMBOS.length;
-    if (batchState.doneCount === 0 && !batchState.running && !batchState.paused) {
+    var total     = BATCH_COMBOS.length;
+    var done      = batchState.doneCount;
+    var failed    = batchState.failCount;
+    var completed = done - failed;
+    var failSuffix = failed > 0 ? ', ' + failed + ' failed' : '';
+    if (done === 0 && !batchState.running && !batchState.paused) {
       pt.textContent = 'Ready';
     } else if (batchState.paused) {
-      pt.textContent = 'Paused: ' + batchState.doneCount + ' of ' + total + ' done';
+      pt.textContent = 'Paused: ' + completed + ' completed' + failSuffix + ' of ' + total;
     } else if (batchState.running) {
-      pt.textContent = 'Running: ' + batchState.doneCount + ' of ' + total + ' done';
-    } else if (batchState.stopped && batchState.doneCount < total) {
-      pt.textContent = batchState.doneCount + ' of ' + total + ' complete (batch stopped)';
+      pt.textContent = 'Running: ' + completed + ' completed' + failSuffix + ' of ' + total;
+    } else if (batchState.stopped && done < total) {
+      pt.textContent = completed + ' completed' + failSuffix + ' of ' + total + ' (batch stopped)';
     } else {
-      pt.textContent = batchState.doneCount + ' of ' + total + ' complete - ready to save';
+      pt.textContent = completed + ' completed' + failSuffix + ' of ' + total + ' - ready to save';
     }
     saveBatchStateToLocalStorage();
   }
@@ -50570,25 +50578,33 @@ document.addEventListener('DOMContentLoaded', function () {
       };
       persistResults();
       batchState.doneCount += 1;
+      if (!structured.success) { batchState.failCount += 1; }
       syncAliases();
       updateProgress();
 
       var _doneLabel = res.blendLabel || '';
-      var viewHtml = "<span style='color:#16a34a;font-weight:600;'>Done</span>";
-      if (_doneLabel) {
-        var _doneOptimized = (res.blendOptimized && res.allowBlendOpt &&
-          typeof res.selectedBlendAiPct === 'number' &&
-          typeof res.effectiveBlendAiPct === 'number' &&
-          res.effectiveBlendAiPct !== res.selectedBlendAiPct);
-        if (_doneOptimized) {
-          viewHtml += " <span style='font-size:0.75rem;color:#475569;'>" + _doneLabel +
-                      " <span style='color:#d97706;font-style:italic;'>*opt</span></span>";
-        } else {
-          viewHtml += " <span style='font-size:0.75rem;color:#475569;'>" + _doneLabel + "</span>";
+      var viewHtml;
+      if (!structured.success) {
+        viewHtml = "<span style='color:#dc2626;font-weight:600;'>Failed</span>";
+        viewHtml += " <a href='#' style='font-size:0.8rem;margin-left:4px;' data-batch-view='" + idx + "'>View</a>";
+        setCell(combo.profile, combo.strategy, viewHtml, 'error');
+      } else {
+        viewHtml = "<span style='color:#16a34a;font-weight:600;'>Done</span>";
+        if (_doneLabel) {
+          var _doneOptimized = (res.blendOptimized && res.allowBlendOpt &&
+            typeof res.selectedBlendAiPct === 'number' &&
+            typeof res.effectiveBlendAiPct === 'number' &&
+            res.effectiveBlendAiPct !== res.selectedBlendAiPct);
+          if (_doneOptimized) {
+            viewHtml += " <span style='font-size:0.75rem;color:#475569;'>" + _doneLabel +
+                        " <span style='color:#d97706;font-style:italic;'>*opt</span></span>";
+          } else {
+            viewHtml += " <span style='font-size:0.75rem;color:#475569;'>" + _doneLabel + "</span>";
+          }
         }
+        viewHtml += " <a href='#' style='font-size:0.8rem;margin-left:4px;' data-batch-view='" + idx + "'>View</a>";
+        setCell(combo.profile, combo.strategy, viewHtml, 'done');
       }
-      viewHtml += " <a href='#' style='font-size:0.8rem;margin-left:4px;' data-batch-view='" + idx + "'>View</a>";
-      setCell(combo.profile, combo.strategy, viewHtml, 'done');
 
       // Auto-save immediately before the next run starts.
       saveAllSequential([idx], function(_saveResult) {
@@ -50613,27 +50629,41 @@ document.addEventListener('DOMContentLoaded', function () {
     batchState.paused  = false;
     syncAliases();
     setPauseButtonLabel(false);
-    setCurrentLabel(batchState.stopped ? 'Batch stopped.' : 'All runs complete.');
+    var _endCompleted = batchState.doneCount - batchState.failCount;
+    var _endFailed    = batchState.failCount;
+    var _endTotal     = BATCH_COMBOS.length;
+    var _endSummary   = _endCompleted + ' completed';
+    if (_endFailed > 0) { _endSummary += ', ' + _endFailed + ' failed'; }
+    _endSummary += ' of ' + _endTotal;
+    setCurrentLabel(batchState.stopped ? 'Batch stopped. ' + _endSummary + '.' : 'All runs complete. ' + _endSummary + '.');
     updateProgress();
     try {
-      console.log('[SKAI batch] onBatchEnd: ' + batchState.doneCount + '/' + BATCH_COMBOS.length +
-        ' combos done, stopped=' + batchState.stopped);
+      console.log('[SKAI batch] onBatchEnd: ' + batchState.doneCount + '/' + _endTotal +
+        ' combos done (' + _endFailed + ' failed), stopped=' + batchState.stopped);
     } catch (_) {}
     var saveRow = qs('skai-batch-save-row');
     if (saveRow && batchState.doneCount > 0 &&
         (batchState.stopped || batchState.doneCount >= BATCH_COMBOS.length)) {
       var saveNote = qs('skai-batch-save-completion-note');
       if (saveNote) {
+        var _failNote = _endFailed > 0 ? ' <strong>' + _endFailed + ' run' + (_endFailed === 1 ? '' : 's') + ' failed</strong> (no numbers captured).' : '';
         if (batchState.stopped && batchState.doneCount < BATCH_COMBOS.length) {
-          saveNote.innerHTML = '<strong>Batch was stopped early.</strong> Only <strong>' +
-            batchState.doneCount + ' of ' + BATCH_COMBOS.length + '</strong> runs completed. ' +
-            'The completed runs were saved automatically. Use <strong>Re-save Selected</strong> if needed.';
+          saveNote.innerHTML = '<strong>Batch was stopped early.</strong> <strong>' +
+            _endCompleted + ' completed, ' + (batchState.doneCount) + ' of ' + _endTotal + '</strong> ran.' + _failNote + ' ' +
+            'Completed runs were saved automatically. Use <strong>Re-save Selected</strong> if needed.';
+          saveNote.style.color       = '#92400e';
+          saveNote.style.background  = '#fffbeb';
+          saveNote.style.borderColor = '#fcd34d';
+        } else if (_endFailed > 0) {
+          saveNote.innerHTML = '<strong>' + _endCompleted + ' of ' + _endTotal + ' runs completed successfully.</strong>' +
+            _failNote + ' Successful runs were saved automatically to your dashboard.' +
+            ' Use <strong>Re-save Selected</strong> for any that need to be resaved.';
           saveNote.style.color       = '#92400e';
           saveNote.style.background  = '#fffbeb';
           saveNote.style.borderColor = '#fcd34d';
         } else {
-          saveNote.innerHTML = '<strong>All ' + BATCH_COMBOS.length +
-            ' runs are done and were saved automatically to your dashboard.</strong> ' +
+          saveNote.innerHTML = '<strong>All ' + _endTotal +
+            ' runs completed and were saved automatically to your dashboard.</strong> ' +
             'Use <strong>Re-save All</strong> or <strong>Re-save Selected</strong> only if needed.';
           saveNote.style.color       = '#065f46';
           saveNote.style.background  = '#f0fdf4';
@@ -51081,6 +51111,7 @@ document.addEventListener('DOMContentLoaded', function () {
         batchState.stopped   = false;
         batchState.index     = 0;
         batchState.doneCount = 0;
+        batchState.failCount = 0;
         batchState.token     = null;
         batchState.pauseResume = null;
         batchResults = [];
@@ -51156,6 +51187,7 @@ document.addEventListener('DOMContentLoaded', function () {
         batchState.paused      = false;
         batchState.index       = 0;
         batchState.doneCount   = 0;
+        batchState.failCount   = 0;
         batchState.token       = null;
         batchState.pauseResume = null;
         batchResults = [];
@@ -51249,6 +51281,7 @@ document.addEventListener('DOMContentLoaded', function () {
       if (!saved || saved.length === 0) { return; }
       batchResults = saved;
       batchState.doneCount = 0;
+      batchState.failCount = 0;
       var hasAny = false;
       for (var i = 0; i < saved.length; i++) {
         var r = saved[i];
@@ -51256,21 +51289,29 @@ document.addEventListener('DOMContentLoaded', function () {
         if (r.done) {
           hasAny = true;
           batchState.doneCount += 1;
+          if (r.status === 'failed') { batchState.failCount += 1; }
           var _rlabel = r.blendLabel || '';
-          var viewHtml = "<span style='color:#16a34a;font-weight:600;'>Done</span>";
-          if (_rlabel) {
-            var _rOptimized = (r.blendOptimized && r.allowBlendOpt &&
-                               typeof r.selectedBlendAiPct === 'number' &&
-                               typeof r.effectiveBlendAiPct === 'number' &&
-                               r.effectiveBlendAiPct !== r.selectedBlendAiPct);
-            if (_rOptimized) {
-              viewHtml += " <span style='font-size:0.75rem;color:#475569;' title='Selected: " + r.selectedBlendAiPct + "% \u2014 Optimized: " + r.effectiveBlendAiPct + "%'>" + _rlabel + " <span style='color:#d97706;font-style:italic;'>*opt</span></span>";
-            } else {
-              viewHtml += " <span style='font-size:0.75rem;color:#475569;'>" + _rlabel + "</span>";
+          var viewHtml;
+          if (r.status === 'failed') {
+            viewHtml = "<span style='color:#dc2626;font-weight:600;'>Failed</span>";
+            viewHtml += " <a href='#' style='font-size:0.8rem;margin-left:4px;' data-batch-view='" + i + "'>View</a>";
+            setCell(r.combo.profile, r.combo.strategy, viewHtml, 'error');
+          } else {
+            viewHtml = "<span style='color:#16a34a;font-weight:600;'>Done</span>";
+            if (_rlabel) {
+              var _rOptimized = (r.blendOptimized && r.allowBlendOpt &&
+                                 typeof r.selectedBlendAiPct === 'number' &&
+                                 typeof r.effectiveBlendAiPct === 'number' &&
+                                 r.effectiveBlendAiPct !== r.selectedBlendAiPct);
+              if (_rOptimized) {
+                viewHtml += " <span style='font-size:0.75rem;color:#475569;' title='Selected: " + r.selectedBlendAiPct + "% \u2014 Optimized: " + r.effectiveBlendAiPct + "%'>" + _rlabel + " <span style='color:#d97706;font-style:italic;'>*opt</span></span>";
+              } else {
+                viewHtml += " <span style='font-size:0.75rem;color:#475569;'>" + _rlabel + "</span>";
+              }
             }
+            viewHtml += " <a href='#' style='font-size:0.8rem;margin-left:4px;' data-batch-view='" + i + "'>View</a>";
+            setCell(r.combo.profile, r.combo.strategy, viewHtml, 'done');
           }
-          viewHtml += " <a href='#' style='font-size:0.8rem;margin-left:4px;' data-batch-view='" + i + "'>View</a>";
-          setCell(r.combo.profile, r.combo.strategy, viewHtml, "done");
         }
       }
       if (hasAny) {
