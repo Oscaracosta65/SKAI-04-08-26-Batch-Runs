@@ -49889,6 +49889,11 @@ document.addEventListener('DOMContentLoaded', function () {
       window.SKAI_TOP_MAIN              = null;
       window.SKAI_DAILY_EXTRA_DIGITS    = [];
       window.SKAI_DAILY_TOP_EXTRAS      = [];
+      // Clear stale probs so epoch-callback SKAI_scoreAndRender calls (from
+      // skai:ml:epoch → render()) cannot use previous-run probs to produce a
+      // skai:score:done event before this run's training has completed.
+      // SKAI_lastProbs is set again by runSkaiML after all seeds finish.
+      window.SKAI_lastProbs             = [];
       // --- Candidate pool ---
       window.SKAI_CANDIDATE_POOL = null;
       // --- Per-run blend tracking ---
@@ -50019,7 +50024,35 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     function checkAllDone() {
-      if (_doneFired && _scoreDoneFired) { finish(); }
+      if (!_doneFired || !_scoreDoneFired) { return; }
+      // Both gates satisfied. Guard: only call finish() if numbers are actually
+      // available.  skai:score:done can fire during epoch callbacks (skai:ml:epoch
+      // → render() → SKAI_scoreAndRender) with stale probs from a previous run
+      // that produce an empty skaiSaveMainOrdered (e.g., domain mismatch).  In
+      // that case _snapMainNums is null and skaiSaveMainOrdered is empty — we
+      // would save with no numbers.  Reset the score:done gate and re-arm so we
+      // catch the next skai:score:done that carries valid picks from this run.
+      var _hasNums = (_snapMainNums && _snapMainNums.length > 0)
+          || (window.skaiSaveMainOrdered && window.skaiSaveMainOrdered.length > 0);
+      if (!_hasNums && !finished) {
+        _scoreDoneFired = false;
+        window.addEventListener('skai:score:done', function _onScoreDoneRetry() {
+          try { window.removeEventListener('skai:score:done', _onScoreDoneRetry, false); } catch (_) {}
+          try { _snapMainNums = (window.skaiSaveMainOrdered && window.skaiSaveMainOrdered.length)
+                  ? window.skaiSaveMainOrdered.slice() : null; } catch (_) {}
+          try { _snapExtraNums = (window.skaiSaveExtraOrdered && window.skaiSaveExtraOrdered.length)
+                  ? window.skaiSaveExtraOrdered.slice() : null; } catch (_) {}
+          try { _snapFpsJson = window.__SKAI_FPS_JSON__ || null; } catch (_) {}
+          try { _snapDailyChosenCombos = (window.SKAI_DAILY_CHOSEN_COMBOS && window.SKAI_DAILY_CHOSEN_COMBOS.length)
+                  ? window.SKAI_DAILY_CHOSEN_COMBOS.slice() : null; } catch (_) {}
+          try { _snapFinalPredictionSets = (window.SKAI_FINAL_PREDICTION_SETS && window.SKAI_FINAL_PREDICTION_SETS.length)
+                  ? window.SKAI_FINAL_PREDICTION_SETS.slice() : null; } catch (_) {}
+          _scoreDoneFired = true;
+          checkAllDone();
+        }, false);
+        return;
+      }
+      finish();
     }
 
     // Register completion listeners only after skai:ml:start for THIS run.
@@ -50063,8 +50096,10 @@ document.addEventListener('DOMContentLoaded', function () {
     };
     window.addEventListener('skai:ml:start', _onMlStart, false);
 
-    // 5-minute safety net in case skai:done never fires.
-    safetyTimer = setTimeout(finish, 300000);
+    // 30-minute safety net in case skai:done never fires (e.g., training
+    // takes very long, or skai:score:done never carries valid numbers).
+    // The original 5-minute timer was too short for high epoch counts.
+    safetyTimer = setTimeout(finish, 1800000);
 
     // Step 4: Trigger the ML runner directly (avoids arm() gating issues).
     var mlRunner = (typeof window.runSkaiML === 'function') ? window.runSkaiML : null;
@@ -50774,6 +50809,25 @@ document.addEventListener('DOMContentLoaded', function () {
     if (!r || !r.done) {
       saveAllSequential(rest, doneCallback, position, total);
       return;
+    }
+
+    // Wait for main numbers if training is still in progress (finish() may have
+    // been called by the safety timer or by an early skai:done+skai:score:done
+    // pair before scoring completed).  Poll every 2 s for up to 15 minutes.
+    var _bfNumsReady = !!(
+      (r.mainNumbers && r.mainNumbers.length > 0) ||
+      (window.skaiSaveMainOrdered && window.skaiSaveMainOrdered.length > 0) ||
+      (r.dailyChosenCombos && r.dailyChosenCombos.length > 0)
+    );
+    if (!_bfNumsReady) {
+      r._bfPollTick = (r._bfPollTick || 0) + 1;
+      if (r._bfPollTick <= 450) { // 450 x 2 s = 15 min
+        setBatchSaveStatus('Waiting for predictions to complete... (' + (r._bfPollTick * 2) + 's)');
+        setTimeout(function() { saveAllSequential(indices, doneCallback, position, total); }, 2000);
+        return;
+      }
+      // 15-minute wait exhausted — proceed anyway (server will return empty_main_numbers
+      // but at least the attempt is made rather than hanging indefinitely).
     }
 
     var statusMsg = "Saving " + position + " of " + total + "...";
