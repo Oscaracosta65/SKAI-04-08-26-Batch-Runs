@@ -51540,12 +51540,8 @@ document.addEventListener('DOMContentLoaded', function () {
     if (doRestore) {
       // Restore grid and progress from sessionStorage while it is still intact.
       restorePersistedResults();
-      // Update localStorage: mark the batch as no longer running.
-      try {
-        state.running = false;
-        state.paused  = false;
-        localStorage.setItem(LS_STATE_KEY, JSON.stringify(state));
-      } catch (_) {}
+      // Clear localStorage so the dialog does not reappear on the next page load.
+      try { localStorage.removeItem(LS_STATE_KEY); } catch (_) {}
     } else {
       // User discarded -- clear both stores.
       try { localStorage.removeItem(LS_STATE_KEY); } catch (_) {}
